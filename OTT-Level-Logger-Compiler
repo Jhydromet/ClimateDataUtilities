@@ -1,0 +1,51 @@
+library(tidyverse)
+library(lubridate)
+
+# Run this script in the directory with the three OTT .csv output files
+
+# Enter the directory name where the raw data downloads are. ensure there are ONLY the three OTT files here.
+
+wd <-  " "
+
+# What month and site is this export for?
+
+expmonth <- "2022-05"
+site <- "E3H"
+
+setwd(wd)
+
+files <- dir(pattern = "*.CSV")
+
+# Single OTT file group read in and tidy
+
+# 001 is water level
+# 002 is temperature
+# 003 is logger battery
+
+
+# This defines the function that will do the compiling.
+
+OTT_Compiler <- function(files, date) {
+  filenameparts <- str_split(files, pattern = " ", simplify = T)
+  
+  dat_type <- filenameparts[2]
+  
+  if (dat_type == "0001") {cols = c("date","time","Waterlevel_m")
+  }else if (dat_type == "0002"){cols = c("date","time","Watertemp_C")
+  }else if (dat_type == "0003"){cols = c("date","time","BattV")}
+  
+  dat <- read_delim(files, delim = ';',col_names = cols, col_types = c("c","t","d")) %>%
+    mutate(date = dmy(date))
+}
+
+# this runs the above function and stitches the data to single data frame
+
+dat <- files %>% 
+  map(OTT_Compiler) %>% 
+  reduce(full_join)
+
+# export to csv
+
+expfolder <- ""
+
+write_csv(dat, paste(" ", expmonth, site, "compiled", sep = "_"))
