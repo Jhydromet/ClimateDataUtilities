@@ -1,151 +1,144 @@
 library(tidyverse)
 library(plotly)
 library(lubridate)
+library(here)
 
-# Search for the symbol #!!!# to locate code that needs to be adapted for new sites
+#Graded data dir
 
+gradeddir <- here::here("processing","2_graded")
+gradedfile <- dir(path = gradeddir, full.names = T)
 
-wd <- ' '
+# Offset data directory
 
-setwd(wd)
+offsetdir <- here::here("processing", "3_offset")
 
-#!!!# Which site & Project are you working on?
+# Which site & Project are you working on?
+SiteID <-  "E3H"
+projectcode <- "20Y0150"
 
-sitecode <-  " "
-projectcode <- " "
+# What is the timestep of the logger?
+timestep <- "15 min"
 
+# -------------------------------------------------------------------
 # Read in data and organize for analysis ----------------------------------
+# -------------------------------------------------------------------
 
 # Read in the data, fix column names
 
-data <-  read_csv(' ',
-                 skip =1,
-                 col_names = c("TIMESTAMP","WaterLevel_m","WaterTemp_C")) %>% 
-  mutate(TIMESTAMP = dmy_hms(TIMESTAMP))
+data <-  read_csv(gradedfile)
 
 # Quick plot if you want
 
-p <- data %>% 
-  pivot_longer(!TIMESTAMP) %>% 
-  ggplot()+
-  geom_line(aes(TIMESTAMP,value))+
-  facet_grid(vars(name))
+data %>% 
+  filter(parameter == "WaterLevel_m") %>% 
+  ggplot() +
+  geom_line(aes(DateTime, value_corrected))
 
-#p
-#ggplotly(p)
 
 # Split temperature and level data -------------------------------------------------------
 
-long.data <- data %>% 
-  pivot_longer(!TIMESTAMP, names_to = "parameter", values_to = "value_raw")
+tempC.data <- filter(data, parameter == "WaterTemp_C")
 
-tempC.data <- filter(long.data, parameter == "WaterTemp_C")
+levelm.data <- filter(data, parameter == "WaterLevel_m")
 
-levelm.data <- filter(long.data, parameter == "WaterLevel_m")
+# -------------------------------------------------------------------
+# Level Offsetting --------------------------------------------------------
+# -------------------------------------------------------------------
 
+# read in offset value .csv. This should be in the 3_offset folder
+offsetfile <- dir(offsetdir, "Survey_Offsets", full.names = T)
 
-# ------------------------------------------------------------------------------
-# Data QAQC by parameter ----------------------------------------------
-# ------------------------------------------------------------------------------
+# read in the file, create interval objects for offset intervals
+offsetdata <- read_csv(offsetfile) %>% 
+  slice(-1) %>% 
+  mutate(DateTime = ymd_hm(DateTime),
+         staff_gauge_reading_m = as.double(staff_gauge_reading_m),
+         offset_forwards_m = as.double(offset_forwards_m)) 
 
-# Temperature QAQC --------------------------------------------------------
-
-#badtempintervals <-  list(interval(ymd_hms("2021-08-03 15:15:00"),ymd_hms("2021-10-06 11:30:00")))
-
-corrected.tempC.data <- tempC.data %>% 
-  mutate(
-    grade  = case_when(
-      is.na(value_raw) | is.nan(value_raw) ~ -2, # GradesNAs or NaNs in data
-      #TIMESTAMP %within% badtempintervals ~ -2, # Grades if in pior defined bad data intervals
-      TRUE ~ 51),
-    approval  = 3,
-    value_corrected = value_raw)
-
-# Water Level QAQC --------------------------------------------------------
-
-#!!!# Level offsets to apply?
-
-# This section of code applies offsets and creates the values_corrected column
-
-# OFFSET 1
-
-# Survey on 6 October 2021 shows benchmarks BM1 & BM4 have not moved, while the top of staff gauge and top of logger rod have subsided by 0.022 and 0.018 m respectively since the previous survey on 02 August 2021. Therefore an offset of 0.02 m is being applied on data from 6 Oct 2021 forward. Additionally, ice affected data on 19 October and from 30 October onward has been omitted.
+surveyoffsets <- offsetdata %>% 
+  drop_na(offset_type) %>% 
+  mutate(offsetinterval = case_when(
+           is.na(lead(DateTime, n=1)) ~ interval(DateTime, tail(levelm.data$DateTime, n=1)),
+           TRUE ~ interval(DateTime, lead(DateTime, n=1)))) %>% 
+  select(offset_type, DateTime, offsetinterval, offset_forwards_m, staff_gauge_reading_m)
 
 
-# INPUT VALUES
-survey1.date <- ymd_hms("2021-08-09 20:45:00")
-survey2.date <- ymd_hms("2021-10-06 17:15:00")
-timestep <- "15 min"
-total.offset <- 0.02
+# Calculate cumulative offset over different offset intervals.
 
-# Create a cumulative offset dataframe
+dateseq <- tibble(DateTime = levelm.data$DateTime)
 
-offset.values <- tibble(TIMESTAMP = seq.POSIXt(from = survey1.date, 
-                                               to = survey2.date, 
-                                               by = timestep),
-                        incremental.offset = total.offset/length(TIMESTAMP),
-                        cusum.offset = cumsum(incremental.offset))
+offset.values <- full_join(dateseq, surveyoffsets) %>% 
+  arrange(DateTime) %>% 
+  fill(!DateTime) %>% 
+  group_by(offsetinterval) %>% 
+  mutate(incremental_offset = offset_forwards_m/(as.numeric(offsetinterval)/as.numeric(as.duration(timestep))), 
+         offset_apply = case_when(
+           offset_type == "rampup" ~ cumsum(incremental_offset),
+           offset_type == "rampdown"   ~ offset_forwards_m - cumsum(incremental_offset),
+           offset_type == "constant" ~ offset_forwards_m)) %>% 
+  ungroup() %>% 
+  select(DateTime, offset_type, offset_forwards_m, offset_apply)
 
-# Filter the level data and split the data into pre, during, and post offset phases
+# apply offsets to the level data. "inc" and "const" refer to incremental or constant offset
 
-# pre.offset data has no corrections
-pre.offset <- levelm.data %>%
-  filter(TIMESTAMP < survey1.date) %>% 
-  mutate(
-    value_corrected = value_raw,
-    grade = 31,
-    approval = 3)
+offset_levelm_data <- full_join(levelm.data, offset.values) %>% 
+  mutate(value_offset = value_corrected + offset_apply)  
 
-# This has the cumulative offset calculation for the corrected values
-incremented.offset <- levelm.data %>%
-  filter(TIMESTAMP %in% offset.values$TIMESTAMP) %>% 
-  mutate(
-    value_corrected = value_raw + offset.values$cusum.offset,
-    grade = 30,
-    approval = 3)
+# re add in the manual staff gauge readings %>% 
 
-# This has a fixed offset 
-post.offset <- levelm.data %>% 
-  filter(TIMESTAMP >survey2.date) %>% 
-  mutate(
-    value_corrected = value_raw + tail(offset.values$cusum.offset,n =1),
-    grade = 31,
-    approval = 3)
+offset_levelm_data <- full_join(offset_levelm_data, select(offsetdata, c(DateTime, staff_gauge_reading_m)))
 
-# Bind the corrected level data back together
-offset.levelm.data <- bind_rows(pre.offset,incremented.offset, post.offset)
+# plot to check
+
+p <- offset_levelm_data %>% 
+  #filter(DateTime >= ymd_hm("2020-06-01 00:00")) %>% 
+  ggplot(aes(x = DateTime))+
+  #geom_point(aes(y = staff_gauge_reading_m))+
+  geom_line(aes(y = value_corrected), linetype = "dashed")+
+  geom_line(aes(y = value_offset), alpha = .5, colour = "blue")
 
 
-#!!!# What are the bad data intervals? e.g. ice effected, dry.. create separate intervals for each
-
-iceintervals <- list(
-  interval(ymd_hms("2021-10-30 01:45:00"),ymd_hms("2022-03-01 00:00:00")),
-  interval(ymd_hms("2021-10-19 08:15:00"), ymd_hms("2021-10-19 13:15:00")),
-  interval(ymd_hms("2021-10-19 08:15:00"), ymd_hms("2021-10-19 13:15:00"))
-)
-
-corrected.levelm.data <- offset.levelm.data %>%
-  mutate(
-    grade = case_when(
-      is.na(value_raw) | is.nan(value_raw) ~ -2, #Grades NAs or NaNs in data
-      TIMESTAMP %within% iceintervals ~ 3, # Grades if in prior defined bad data intervals
-      TRUE ~ grade),  # keep grades a previously defined otherwise
-    approval  = 3,
-    ) 
+p
+ggplotly(p)
 
 
-# re-join temp and level data
 
-corrected.data <- full_join(corrected.levelm.data, corrected.tempC.data)
+# Rejoin the temperature data, fix the grades -----------------------------
 
+offset_levelm_data <- offset_levelm_data %>% 
+  mutate(grade = case_when(
+    offset_type == "inc" ~ grade - 1,
+    TRUE ~ grade)) %>% 
+  mutate(value_corrected = value_offset) %>% 
+  select(!contains("offset"), !staff_gauge_reading_m)
+
+corrected.data <- full_join(offset_levelm_data, tempC.data)%>% 
+  drop_na(parameter)
+
+# final pretty plot -------------------------------------------------------
+
+plotname <- paste(Sys.Date(),
+                  SiteID,
+                  "Offset",
+                  sep = "_")
+
+corrected.data %>% 
+  ggplot(aes(x = DateTime)) +
+  #geom_line(aes(y = value_raw), alpha = 0.5, colour = "blue") +
+  geom_line(aes(y = value_corrected)) +
+  labs(title = plotname) +
+  facet_grid(vars(parameter), scales = "free")
+
+ggsave(p, filename = paste(offsetdir, paste0(plotname, ".png"), sep ="/"), device = "png")
 
 # Final Data Export -------------------------------------------------------
 
+# apply the grade labeller to the data again
+
 final.data <- corrected.data %>% 
-  rename(DateTime = "TIMESTAMP") %>% 
   mutate(
     ProjectID = projectcode,
-    StationID = sitecode,
+    StationID = SiteID,
     value_raw = na_if(value_raw, "NaN"),
     value_corrected = case_when(
       grade >= 11 ~ as.character(value_corrected), # set corrected value to NA if not passing QAQC
@@ -178,49 +171,11 @@ final.data <- corrected.data %>%
          value_raw,	value_corrected,	grade,	grade_label,	approval,	approval_label)
 
 
-# Plot to check
-
-p <- final.data %>%
-  filter(grade >11) %>% 
-  ggplot()+
-  geom_line(aes(DateTime,value_raw), linetype = "dashed")+
-  geom_line(aes(DateTime,as.double(value_corrected)))+
-  geom_point(aes(DateTime, as.double(value_corrected), colour = as.factor(grade)))+
-  scale_colour_discrete(name = "Grades")+
-  scale_y_continuous(name = element_blank())+
-  facet_grid(rows = vars(parameter),scales = "free")
-
-ggplotly(p)
-p
-ggsave(p, filename = "Offset_E3(H).png", device = "png")
-
 export <- final.data %>% 
   mutate(across(.cols = everything(), as.character)) 
 
 #!!!# Where is this being exported?
 
-export.dest <- " "
 
-write_csv(export.final, path = export.dest)
-
-
-# Summary Statistics ------------------------------------------------------
-
-
-data.summary <- Graded.dat %>% 
-  filter(grade >= 10) %>% # this drops all the error Graded data
-  group_by(parameter) %>% 
-  mutate(value = na_if(value_raw, NaN)) %>% 
-  mutate(mean.value = mean(value_raw, na.rm = T),
-         max.value = max(value_raw, na.rm = T),
-         min.value = min(value_raw, na.rm = T),
-         date = date(TIMESTAMP)) %>%
-  select(!TIMESTAMP) %>% 
-  filter(value_raw == max.value | value_raw == min.value) %>% 
-  distinct()
-
-# Summary Export
-
-write_csv(data.summary, " ")
-
+write_csv(export, paste(offsetdir, paste0(plotname, ".csv"), sep ="/"))
 
