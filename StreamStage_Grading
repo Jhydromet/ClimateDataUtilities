@@ -1,0 +1,215 @@
+library(tidyverse)
+library(plotly)
+library(lubridate)
+library(dygraphs)
+library(xts)
+
+# Where is your compiled data? (The quotes are folder names relative to the R project file)
+
+datadir <- here::here("processing", "1_compiled")
+
+datafile <- dir(datadir, "_compiled.csv", full.names = T)
+
+gradeddir <- here::here("processing", "2_graded")
+
+#Which site & Project are you working on?
+
+SiteID <-  "E3H"
+projectcode <- "20Y0150"
+
+
+# Read in data and organize for analysis ----------------------------------
+
+# Read in the data, fix column names if needed. COMPILE OTT DATA WITH COMPILER SCRIPT
+
+
+# test file
+# datafile <- paste(datadir, "2021-05_E3H_compiled.csv", sep = "/")
+
+
+# define file reader function
+
+reader <- function(datafile) {
+  
+  df <- str_split(datafile, "compiled/", simplify = T)[2]
+  
+  data <-  read_csv(datafile) %>% 
+    mutate(df = df)
+}
+
+# run the above function on all files in the data directory
+
+data <- datafile %>%
+  map(reader) %>% 
+  reduce(rbind)
+
+# p <- data %>% 
+#   ggplot() +
+#   geom_line(aes(DateTime, WaterLevel_m))
+# 
+# ggplotly(p)
+
+# Create grade for poor data ----------------------------------------------
+
+
+# What are the bad data intervals?
+
+iceintervals <- list(interval(ymd_hms("2021-10-30 01:00:00"), ymd_hms("2022-04-18 13:45:00")),
+                     interval(ymd_hms("2021-10-18 08:00:00"), ymd_hms("2021-10-19 14:00:00")),
+                     interval(ymd_hms("2022-04-16 07:30:00"), ymd_hms("2022-04-17 17:30:00")),
+                     interval(ymd_hms("2018-10-31 18:30:00"), ymd_hms("2019-04-07 13:15:00")),
+                     interval(ymd_hms("2019-11-03 23:30:00"), ymd_hms("2020-05-06 11:15:00")),
+                     interval(ymd_hms("2020-12-07 23:00:00"), ymd_hms("2021-04-30 07:30:00")))
+
+fairlevelintervals <- list(#interval(ymd_hms("2019-04-07 13:15:00"), ymd_hms("2019-05-31 11:45:00")),
+                           #interval(ymd_hms("2020-06-03 09:15:00"), ymd_hms("2020-06-08 13:30:00")),
+                           #interval(ymd_hms("2021-04-30 07:30:00"), ymd_hms("2021-06-21 08:30:00")),
+                           #interval(ymd_hms("2020-05-06 11:15:00"), ymd_hms("2020-06-08 13:30:00"))
+                           )
+
+badtempintervals <-  list(interval(ymd_hms("2021-08-03 15:15:00"), ymd_hms("2021-10-06 11:30:00")))
+
+
+# Grade ID
+# -2	Unusable data
+# -1	Unspecified
+# 0	Undefined
+# 1	Unverified data
+# 2	Dry conditions affect record
+# 3	Ice conditions affect record
+# 4	Incomplete or partial aggregated record
+# 5	Estimated data with No confidence
+# 10	Estimated data with Poor confidence
+# 11	Poor data
+# 20	Estimated data with Fair confidence
+# 21	Fair data
+# 30	Estimated data with Good confidence
+# 31	Good data
+# 40	Estimated data with Very Good confidence
+# 41	Very Good data
+# 50	Estimated data with Excellent confidence
+# 51	Excellent data
+
+#Approval ID
+# 0	Undefined
+# 1	Working
+# 2	In Review
+# 3	Approved
+
+
+data.Graded <- data %>% 
+  mutate(WaterLevel_m_grade  = case_when(is.na(WaterLevel_m) | is.nan(WaterLevel_m) ~ -2, #gradeNAs or NaNs in data
+                                         DateTime %within% iceintervals ~ 3, # grade if in pior defined bad data intervals
+                                         DateTime %within% fairlevelintervals ~ 11,
+                                         TRUE ~ 31),
+         WaterTemp_C_grade  = case_when(is.na(WaterTemp_C) | is.nan(WaterTemp_C) ~ -2, # gradeNAs or NaNs in data
+                                        #DateTime %within% badtempintervals ~ -2, # grade if in pior defined bad data intervals
+                                        TRUE ~ 51),
+         WaterLevel_m_approval  = 3,
+         WaterTemp_C_approval  = 3)
+
+
+# Plotting ----------------------------------------------------------------
+
+# flip the data around for easy plotting
+
+grade <- data.Graded %>% 
+  select(DateTime, contains("grade")) %>% 
+  pivot_longer(!DateTime, values_to = "grade", names_to = "parameter")
+
+grade$parameter <- str_remove_all(grade$parameter, pattern = "_grade")
+
+approval <- data.Graded %>% 
+  select(DateTime, contains("approval")) %>% 
+  pivot_longer(!DateTime, values_to = "approval", names_to = "parameter")
+
+
+approval$parameter <- str_remove_all(approval$parameter, pattern = "_approval")
+
+Graded.dat <- data.Graded %>% 
+  select(DateTime, WaterLevel_m, WaterTemp_C) %>% 
+  pivot_longer(!DateTime, names_to = "parameter", values_to = "value_raw")
+
+Graded.dat <- full_join(grade,Graded.dat, by = c("DateTime","parameter"))
+Graded.dat <- full_join(Graded.dat,approval) %>% 
+  distinct()
+
+export <- Graded.dat %>% 
+  mutate(
+    ProjectID = projectcode,
+    StationID = SiteID,
+    value_raw = na_if(value_raw, "NaN"),
+    value_corrected = case_when(
+      grade >= 11 ~ as.character(value_raw),
+      TRUE ~ "NA"),
+    grade_label = case_when(
+      grade == -2	~ "Unusable data",
+      grade == -1	~ "Unspecified",
+      grade == 0	~ "Undefined",
+      grade == 1	~ "Unverified data",
+      grade == 2 ~	"Dry conditions affect record",
+      grade == 3 ~	"Ice conditions affect record",
+      grade == 4 ~	"Incomplete or partial aggregated record",
+      grade == 5 ~	"Estimated data with No confidence",
+      grade == 10 ~	"Estimated data with Poor confidence",
+      grade == 11	~ "Poor data",
+      grade == 20 ~	"Estimated data with Fair confidence",
+      grade == 21	~ "Fair data",
+      grade == 30 ~	"Estimated data with Good confidence",
+      grade == 31 ~	"Good data",
+      grade == 40 ~	"Estimated data with Very Good confidence",
+      grade == 41 ~	"Very Good data",
+      grade == 50 ~	"Estimated data with Excellent confidence",
+      grade == 51 ~	"Excellent data"),
+    approval_label = case_when(
+      approval == 0	~ "Undefined",
+      approval == 1	~ "Working",
+      approval == 2	~ "In Review",
+      approval == 3	~ "Approved")) %>% 
+  select(ProjectID,	StationID,	DateTime,	parameter,	
+         value_raw,	value_corrected,	grade,	grade_label,	approval,	approval_label)
+
+
+# Plot All of the data with the grade to see them
+
+p <- export  %>% 
+  filter(between(DateTime, ymd_hm("2022-01-01 00:00"), ymd_hm("2022-07-15 00:00"))) %>% 
+  ggplot()+
+  geom_line(aes(DateTime,value_raw))+
+  geom_point( aes(DateTime, value_raw, colour = as.character(grade_label)))+
+  scale_colour_discrete(name = "grade")+
+  scale_y_continuous(name = NULL)+
+  labs(title = paste(projectcode,  SiteID, "Graded", sep = " "))+
+  facet_grid(rows = vars(parameter), scales = "free")
+
+#p
+
+ggplotly(p)
+
+
+
+
+# save a plot figure if you like (probably need to massage titles etc)
+
+plotname <- paste(Sys.Date(),
+                  SiteID,
+                  "Graded",
+                  sep = "_")
+
+
+ggsave(p, filename = paste0(plotname,".png"), device = "png")
+
+
+
+# Exporting Graded Data ---------------------------------07------------------
+
+export.final <- export %>% 
+  mutate(across(.cols = everything(), as.character)) 
+
+
+exportname <- paste(Sys.Date(),
+                    SiteID,
+                    "Graded.csv",
+                    sep = "_")
+
+write_csv(export.final, file = paste0(paste("processing/2_graded", exportname, sep = "/")), ".csv")
