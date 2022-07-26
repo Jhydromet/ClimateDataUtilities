@@ -49,6 +49,7 @@ View(ncmeta::nc_atts(file, "time"))
 # Plot check
 
 data %>%
+  pivot_longer(!date) %>% 
   ggplot()+
   geom_line(aes(date,value,colour = name))+
   facet_grid(rows = "name", scales = "free")
