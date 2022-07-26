@@ -4,43 +4,55 @@ library(tidyverse)
 library(RNetCDF)
 
 
+# Define directory and filename of ncdf file ------------------------------
+
 baro.fp <- here("Precipitation", "1_Raw", "ERA5-Land")
 baro.fn <- dir(baro.fp, pattern = "*.nc", full.names = T)
 
+# read in ncdf file as tidync then
+# filter the lat/lon down to a single grid cell in centre of watershed.
+
 baro <- tidync(baro.fn) %>%
-  hyper_filter(longitude = between(longitude, -115.45, -115.4),  # filter the lat/lon down to a single grid cell in centre of watershed.
+  hyper_filter(longitude = between(longitude, -115.45, -115.4),  
                latitude = between(latitude, 56.0, 56.05))
 
-time_ex <- baro %>%  # extract time array
+# extract time array
+
+time_ex <- baro %>%
   activate("D2") %>% 
   hyper_array()
 
-tunit <- ncmeta::nc_atts(baro.fn, "time") %>% #extract time units
+# extract time units
+
+tunit <- ncmeta::nc_atts(baro.fn, "time") %>% 
   tidyr::unnest(cols = c(value)) %>% 
   dplyr::filter(name == "units")
 
-time_parts <- RNetCDF::utcal.nc(tunit$value, time_ex$time) # adjust time step to date formats
+# generate time components array based on the units
+
+time_parts <- RNetCDF::utcal.nc(tunit$value, time_ex$time)
+
+# extract all data as tibble timeseries with proper datetime format
 
 data <- hyper_tibble(baro) %>% 
-  summarise(date = ISOdatetime(time_parts[,"year"], # store date in datetime format
+  summarise(date = ISOdatetime(time_parts[,"year"],
                                time_parts[,"month"], 
                                time_parts[,"day"], 
                                time_parts[,"hour"], 
                                time_parts[,"minute"], 
                                time_parts[,"second"]),
             pressure = sp,
-            precip = tp) %>% 
-  pivot_longer(!date)
+            precip = tp) 
 
 View(ncmeta::nc_atts(file, "time"))
 
-
-# DO I HAVE PRECIP SUMMED PROPERLY HERE?
+# Plot check
 
 data %>%
   ggplot()+
   geom_line(aes(date,value,colour = name))+
   facet_grid(rows = "name", scales = "free")
 
-write_csv(data, "Tallman_ERA5LAND_Reanalysis_2021to2022.csv")
+# export
 
+write_csv(data, "Tallman_ERA5LAND_Reanalysis_2021to2022.csv")
