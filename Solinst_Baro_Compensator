@@ -1,0 +1,67 @@
+library(lubridate)
+library(tidyverse)
+library(plotly)
+library(here)
+library(ecoflux)
+library(XML)
+
+# Read in logger data ----------------------------------------------------------
+
+site <- "MW-21TM-3"
+
+logger.dir <- here("Monitor", "Tallman", "DataLoggers",site)
+logger.fn <- dir(logger.dir, pattern = "*.xle", full.names = T)
+
+logger <- tibble(read_xle(logger.fn)) %>% 
+  select(Date = contains("date"),
+         Time = contains("time"),
+         level_m,
+         temperature_c) %>% 
+  mutate(DateTime = ymd_hms(paste(Date,Time, " "))) %>% 
+  select(DateTime, level_m, temperature_c) 
+
+
+# Read in baro data ERA5Land ----------------------------------------------
+
+baro.dir <- here("Monitor","Tallman","Dataloggers")
+baro.fn <- dir(baro.dir, pattern = "*.csv", full.names = T)
+
+baro <- read_csv(baro.fn) %>% 
+  mutate(DateTime = DateTime - hours(14),
+         baro_m = pressure*0.000101972) %>%  # convert pressure in Pa to m equivalent
+  select(DateTime, baro_m)
+
+
+# Join datasets together and plot -----------------------------------------
+
+data <- full_join(logger, baro) %>% 
+  filter(date(DateTime) > ymd("2021-09-19")) %>% 
+  mutate(level_comp = level_m - baro_m) %>% 
+  group_by(Date = date(DateTime)) 
+
+p <- data %>% 
+  ungroup() %>% 
+  select(!Date) %>% 
+  pivot_longer(!DateTime) %>% 
+  ggplot()+
+  geom_line(aes(DateTime, value, colour = name))+
+  facet_grid(vars(name), scales = "free")
+
+ggplotly(p)
+
+mn.data <- data %>% 
+  summarise(baro_m = mean(baro_m, na.rm = T),
+            level_m = mean(level_m),
+            level_comp = mean(level_comp, na.rm = T),
+            temperature_c = mean(temperature_c)) 
+
+p <- mn.data %>% 
+  pivot_longer(!Date) %>% 
+  ggplot()+
+  geom_line(aes(Date, value, colour = name))+
+  facet_grid(vars(name), scales = "free")
+
+ggplotly(p)
+
+
+write_csv(mn.data, paste(logger.dir,paste0(site,"_baro_compensated_", Sys.Date(),".csv"), sep = "/"))
