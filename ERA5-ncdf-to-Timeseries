@@ -1,0 +1,46 @@
+library(here)
+library(tidync)
+library(tidyverse)
+library(RNetCDF)
+
+
+baro.fp <- here("Precipitation", "1_Raw", "ERA5-Land")
+baro.fn <- dir(baro.fp, pattern = "*.nc", full.names = T)
+
+baro <- tidync(baro.fn) %>%
+  hyper_filter(longitude = between(longitude, -115.45, -115.4),  # filter the lat/lon down to a single grid cell in centre of watershed.
+               latitude = between(latitude, 56.0, 56.05))
+
+time_ex <- baro %>%  # extract time array
+  activate("D2") %>% 
+  hyper_array()
+
+tunit <- ncmeta::nc_atts(baro.fn, "time") %>% #extract time units
+  tidyr::unnest(cols = c(value)) %>% 
+  dplyr::filter(name == "units")
+
+time_parts <- RNetCDF::utcal.nc(tunit$value, time_ex$time) # adjust time step to date formats
+
+data <- hyper_tibble(baro) %>% 
+  summarise(date = ISOdatetime(time_parts[,"year"], # store date in datetime format
+                               time_parts[,"month"], 
+                               time_parts[,"day"], 
+                               time_parts[,"hour"], 
+                               time_parts[,"minute"], 
+                               time_parts[,"second"]),
+            pressure = sp,
+            precip = tp) %>% 
+  pivot_longer(!date)
+
+View(ncmeta::nc_atts(file, "time"))
+
+
+# DO I HAVE PRECIP SUMMED PROPERLY HERE?
+
+data %>%
+  ggplot()+
+  geom_line(aes(date,value,colour = name))+
+  facet_grid(rows = "name", scales = "free")
+
+write_csv(data, "Tallman_ERA5LAND_Reanalysis_2021to2022.csv")
+
