@@ -1,0 +1,33 @@
+# Daymet has a 365 day calendar with dec 31 trimmed on leap years. This script will correct the .nc metadata to reflect the 365_day calendar, and correct for the missing leap year timestamps by forcing a continuous timestep.
+
+# The script is meant to be ran after merging .nc files together (I used cdo mergetime).
+
+library(RNetCDF)
+library(here)
+
+# Screwing around with .nc files to try get gridded to work ---------------
+
+fn <- here("Raven Models","test", "model","input","tmin_compiled.nc")
+
+
+fo <- open.nc(fn,write = T)
+
+# Best route - 365_day calendar -------------------------------------------
+
+# re-establish the date sequence as 365 day years. shift dates back to account for missing leap dates.
+
+# set 365_day calendar type
+RNetCDF::att.put.nc(ncfile = fo, variable = "time", name = "calendar", type = "NC_CHAR", value = "365_day")
+RNetCDF::att.get.nc(fo, "time", "calendar")
+
+#get the time data
+time <- RNetCDF::var.get.nc(fo, "time")
+
+#create new continuous time seq
+time.new <- seq(from = head(time, n = 1), to = as.vector(head(time, n = 1) + length(time) - 1), by = 1)
+
+# put time.new as the new time stamps
+
+var.put.nc(fo, "time", time.new)
+
+close.nc(fo)
